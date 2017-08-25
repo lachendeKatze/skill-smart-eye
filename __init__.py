@@ -31,6 +31,10 @@ import time
 import json
 import picamera
 
+# NLP/NLG related libraries
+from random import *
+from pattern.en import parse, Sentence, article
+
 __author__ = 'GregV', '@lachendeKatze'
 
 LOGGER = getLogger(__name__)
@@ -38,19 +42,25 @@ LOGGER = getLogger(__name__)
 class SmartEyeSkill(MycroftSkill):
     def __init__(self):
         super(SmartEyeSkill, self).__init__(name="SmartEyeSkill")
-	self.clarifai_app = ClarifaiApp(api_key='***Your API Key Here')
- 
 	self.camera = picamera.PiCamera() 
 	self.camera.resolution = (2592,1944)
 
     def initialize(self):
 	self.load_data_files(dirname(__file__))
+	self.clarifai_app = ClarifaiApp(api_key=self.settings["api_key"])
+	LOGGER.info("api_key:" + self.settings["api_key"])	
 
         local_image_intent = IntentBuilder("LocalImageIntent").require("LocalImageKeyword").require("FileName").build()
         self.register_intent(local_image_intent, self.handle_local_image_intent)
 
 	general_eye_intent = IntentBuilder("GeneralEyeIntent").require("GeneralEyeKeyword").build()
 	self.register_intent(general_eye_intent, self.handle_general_eye_intent)       
+
+	describe_intent = IntentBuilder("DescribeIntent").require("DescribeKeyword").build()
+	self.register_intent(describe_intent, self.handle_describe_intent)
+
+	recognize_intent = IntentBuilder("RecognizeIntent").require("RecognizeKeyword").require("ObjName").build()
+	self.register_intent(recognize_intent, self.handle_recognize_intent)
 
     def handle_local_image_intent(self, message):
 
@@ -75,25 +85,58 @@ class SmartEyeSkill(MycroftSkill):
 	
     def handle_general_eye_intent(self,message):
 	self.speak_dialog("general.eye")
-	# 1st task is take a picture with the PiCamera and for now put it in
-	# in a standard location and get it a standard file name; this will
-	# result in an overwrite everytime, but ok to test functionality
-	# TODO: give memory! rename time&date stamp each image?, perhaps restamp with time date and 
-	# dominate concepts from clarifai?
-	# TODO: learn about mycrfot config to allow for storing image in a flexible location
-	
-	image_location = '/home/mycroft/smarteye.jpg'		
+	self.take_picture()
+	results = self.general_model_results()
+	if results != "blank":
+		self.speak_dialog("general.eye.results",{"results": results})
+	else:
+		self.speak("sorry for some reason I can't see anything")
+	n,a = self.nouns_and_adjectives(results)
+	LOGGER.info('results: '+ results)
+	LOGGER.info('nouns: ' + ', '.join(n))
+	LOGGER.info('adjectives: ' + ', '.join(a))
+    
+    def handle_describe_intent(self,message):
+	sentence_fragment = ''
+	self.speak_dialog("general.eye")
+	self.take_picture()
+	results = self.general_model_results()
+	if results != "blank":
+		sentence_fragment = self. make_description(results)
+		if sentence_fragment == "blank":
+			self.speak("sorry, can't seem to see anything here")
+		else:
+			self.speak_dialog("describe.eye.results", {"results": sentence_fragment})
+	else:
+		self.speak("sorry for some reason I can't see anything")
+
+    def handle_recognize_intent(self,message):	
+	self.speak_dialog("general.eye")
+	object_name = message.data.get("ObjName")
+	self.take_picture()
+        results = self.general_model_results()
+	nouns, adjectives = self.nouns_and_adjectives(results)
+	if adjectives: adjective_to_use = ''.join(sample(adjectives,1))
+	if object_name in nouns:
+		yes_str = "Yes I see " + article(object_name) + " " + object_name
+		self.speak(yes_str)
+	else:
+		speak_str = "no I don't see " + article(object_name) + " " + object_name
+		noun_to_use = ''.join(sample(nouns,1))
+                speak_str = speak_str + " but I do see " + article(noun_to_use) + " " + noun_to_use
+		self.speak(speak_str)
+
+    def take_picture(self):
 	self.camera.zoom = (0.0,0.0,0.75,0.75)
 	self.camera.start_preview()
 	time.sleep(2)
 	self.camera.stop_preview()
-	self.camera.capture(image_location)
-		
-	# send the image to clarifai for analysis with the 'general" model and
-	# return concepts with 98% or greater confidence
+	self.camera.capture(self.settings["img_location"])
+    
+    def general_model_results(self):
 	general_model = self.clarifai_app.models.get("general-v1.3")
 	try:
-		response = general_model.predict_by_filename(image_location,min_value=0.90)	
+		response = general_model.predict_by_filename(self.settings["img_location"],min_value=0.90)	
 		j_dump = json.dumps(response['outputs'][0],separators=(',',': '),indent=3)
 		j_load = json.loads(j_dump)
 		index = 0
@@ -101,10 +144,39 @@ class SmartEyeSkill(MycroftSkill):
 		for each in j_load['data']['concepts']:
 			results = results + j_load['data']['concepts'][index]['name'] + " "
 			index = index + 1
-		self.speak_dialog("general.eye.results",{"results": results})
+		results = results.replace('no person','') #no persn results will cause too much trouble later on
+		return results
 	except:
-		self.speak("sorry for some reason I can't see anything")
+		return "blank"	
 
+    def nouns_and_adjectives(self,results):
+        nouns = []
+        adjectives = []	
+        results_tree = parse(results,chunks=False)
+        sentence = Sentence(results_tree)
+        for word in sentence:
+		if word.type == 'NN':
+			nouns.append(word.string)
+		elif word.type =='JJ':
+			adjectives.append(word.string)
+        return nouns, adjectives
+
+    def make_description(self,results):
+	noun_to_use = ''
+	adjective_to_use = ''
+
+	nouns, adjectives = self.nouns_and_adjectives(results)
+
+	if len(nouns)>=1:
+		noun_to_use = ''.join(sample(nouns,1))
+	else:
+		return "blank"
+	if len(adjectives)>=1:
+		adjective_to_use = ''.join(sample(adjectives,1))
+   		return article(adjective_to_use) + ' ' + adjective_to_use + ' ' + noun_to_use
+	else:
+		return article(noun_to_use) + ' ' + noun_to_use
+	
     def stop(self):
         pass
 

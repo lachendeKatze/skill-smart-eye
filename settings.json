@@ -1,0 +1,4 @@
+{
+	"api_key": "your api_key for clarifai here",
+	"img_location": "/home/mycroft/smarteye.jpg"
+}
